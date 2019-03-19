@@ -76,6 +76,16 @@ var (
 			}),
 		},
 		{
+			Name: "kube_hpa_spec_metrics",
+			Type: metric.Gauge,
+			Help: "Metrics used to calculate the desired replica count",
+			GenerateFunc: wrapHPAFunc(func(a *autoscaling.HorizontalPodAutoscaler) *metric.Family {
+				return &metric.Family{
+					Metrics: generateMetricsFromMetricSpec(a.Spec.Metrics),
+				}
+			}),
+		},
+		{
 			Name: "kube_hpa_status_current_replicas",
 			Type: metric.Gauge,
 			Help: "Current number of replicas of pods managed by this autoscaler.",
@@ -143,6 +153,16 @@ var (
 				}
 			}),
 		},
+		{
+			Name: "kube_hpa_status_currentmetrics",
+			Type: metric.Gauge,
+			Help: "Current metrics is the last read state of the metrics used by this autoscaler",
+			GenerateFunc: wrapHPAFunc(func(a *autoscaling.HorizontalPodAutoscaler) *metric.Family {
+				return &metric.Family{
+					Metrics: generateMetricsFromMetricStatus(a.Status.CurrentMetrics),
+				}
+			}),
+		},
 	}
 )
 
@@ -170,4 +190,69 @@ func createHPAListWatch(kubeClient clientset.Interface, ns string) cache.ListWat
 			return kubeClient.AutoscalingV2beta1().HorizontalPodAutoscalers(ns).Watch(opts)
 		},
 	}
+}
+
+func generateMetricsFromMetricSpec(mss []autoscaling.MetricSpec) []*metric.Metric {
+	out := make([]*metric.Metric, 0)
+
+	for _, ms := range mss {
+		m := &metric.Metric{
+			LabelKeys:   []string{"type"},
+			LabelValues: []string{string(ms.Type)},
+		}
+
+		if ms.Type == autoscaling.ResourceMetricSourceType {
+			m.LabelKeys = append(m.LabelKeys, "name")
+			m.LabelValues = append(m.LabelValues, string(ms.Resource.Name))
+
+			if v := ms.Resource.TargetAverageUtilization; v != nil {
+				m.LabelKeys = append(m.LabelKeys, "target_type")
+				m.LabelValues = append(m.LabelValues, "AverageUtilization")
+				m.Value = float64(*v)
+				out = append(out, m)
+			} else if v := ms.Resource.TargetAverageValue; v != nil {
+				m.LabelKeys = append(m.LabelKeys, "target_type")
+				m.LabelValues = append(m.LabelValues, "AverageValue")
+				m.Value = float64(v.MilliValue())
+				out = append(out, m)
+			}
+		}
+	}
+
+	return out
+}
+
+func generateMetricsFromMetricStatus(mss []autoscaling.MetricStatus) []*metric.Metric {
+	out := make([]*metric.Metric, 0)
+
+	for _, ms := range mss {
+		m := &metric.Metric{
+			LabelKeys:   []string{"type"},
+			LabelValues: []string{string(ms.Type)},
+		}
+
+		if ms.Type == autoscaling.ResourceMetricSourceType {
+			m.LabelKeys = append(m.LabelKeys, "name")
+			m.LabelValues = append(m.LabelValues, string(ms.Resource.Name))
+
+			if v := ms.Resource.CurrentAverageUtilization; v != nil {
+				mcopy := &metric.Metric{}
+				copy(mcopy.LabelKeys, m.LabelKeys)
+				copy(mcopy.LabelValues, m.LabelValues)
+
+				mcopy.LabelKeys = append(m.LabelKeys, "target_type")
+				mcopy.LabelValues = append(m.LabelValues, "AverageUtilization")
+				mcopy.Value = float64(*v)
+				out = append(out, mcopy)
+			}
+
+			v := ms.Resource.CurrentAverageValue;
+			m.LabelKeys = append(m.LabelKeys, "target_type")
+			m.LabelValues = append(m.LabelValues, "AverageValue")
+			m.Value = float64(v.MilliValue())
+			out = append(out, m)
+		}
+	}
+
+	return out
 }
