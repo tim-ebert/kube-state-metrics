@@ -19,7 +19,7 @@ package store
 import (
 	"k8s.io/kube-state-metrics/pkg/metric"
 
-	autoscaling "k8s.io/api/autoscaling/v2beta1"
+	autoscaling "k8s.io/api/autoscaling/v2beta2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -184,10 +184,10 @@ func wrapHPAFunc(f func(*autoscaling.HorizontalPodAutoscaler) *metric.Family) fu
 func createHPAListWatch(kubeClient clientset.Interface, ns string) cache.ListerWatcher {
 	return &cache.ListWatch{
 		ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
-			return kubeClient.AutoscalingV2beta1().HorizontalPodAutoscalers(ns).List(opts)
+			return kubeClient.AutoscalingV2beta2().HorizontalPodAutoscalers(ns).List(opts)
 		},
 		WatchFunc: func(opts metav1.ListOptions) (watch.Interface, error) {
-			return kubeClient.AutoscalingV2beta1().HorizontalPodAutoscalers(ns).Watch(opts)
+			return kubeClient.AutoscalingV2beta2().HorizontalPodAutoscalers(ns).Watch(opts)
 		},
 	}
 }
@@ -205,16 +205,74 @@ func generateMetricsFromMetricSpec(mss []autoscaling.MetricSpec) []*metric.Metri
 			m.LabelKeys = append(m.LabelKeys, "name")
 			m.LabelValues = append(m.LabelValues, string(ms.Resource.Name))
 
-			if v := ms.Resource.TargetAverageUtilization; v != nil {
-				m.LabelKeys = append(m.LabelKeys, "target_type")
-				m.LabelValues = append(m.LabelValues, "AverageUtilization")
-				m.Value = float64(*v)
-				out = append(out, m)
-			} else if v := ms.Resource.TargetAverageValue; v != nil {
-				m.LabelKeys = append(m.LabelKeys, "target_type")
-				m.LabelValues = append(m.LabelValues, "AverageValue")
-				m.Value = float64(v.MilliValue())
-				out = append(out, m)
+			mt := ms.Resource.Target
+			if mt.Type == autoscaling.UtilizationMetricType {
+				if v := mt.AverageUtilization; v != nil {
+					m.LabelKeys = append(m.LabelKeys, "target_type")
+					m.LabelValues = append(m.LabelValues, "AverageUtilization")
+					m.Value = float64(*v)
+					out = append(out, m)
+				}
+			} else if mt.Type == autoscaling.AverageValueMetricType {
+				if v := mt.AverageValue; v != nil {
+					m.LabelKeys = append(m.LabelKeys, "target_type")
+					m.LabelValues = append(m.LabelValues, "AverageValue")
+					m.Value = float64(v.MilliValue()) / 1000.0
+					out = append(out, m)
+				}
+			}
+		} else if ms.Type == autoscaling.PodsMetricSourceType {
+			m.LabelKeys = append(m.LabelKeys, "metric_name")
+			m.LabelValues = append(m.LabelValues, ms.Pods.Metric.Name)
+
+			mt := ms.Pods.Target
+			if mt.Type == autoscaling.AverageValueMetricType {
+				if v := mt.AverageValue; v != nil {
+					m.LabelKeys = append(m.LabelKeys, "target_type")
+					m.LabelValues = append(m.LabelValues, "AverageValue")
+					m.Value = float64(v.MilliValue()) / 1000.0
+					out = append(out, m)
+				}
+			}
+		} else if ms.Type == autoscaling.ObjectMetricSourceType {
+			m.LabelKeys = append(m.LabelKeys, "metric_name")
+			m.LabelValues = append(m.LabelValues, ms.Object.Metric.Name)
+
+			mt := ms.Object.Target
+			if mt.Type == autoscaling.AverageValueMetricType {
+				if v := mt.AverageValue; v != nil {
+					m.LabelKeys = append(m.LabelKeys, "target_type")
+					m.LabelValues = append(m.LabelValues, "AverageValue")
+					m.Value = float64(v.MilliValue()) / 1000.0
+					out = append(out, m)
+				}
+			} else if mt.Type == autoscaling.ValueMetricType {
+				if v := mt.Value; v != nil {
+					m.LabelKeys = append(m.LabelKeys, "target_type")
+					m.LabelValues = append(m.LabelValues, "Value")
+					m.Value = float64(v.MilliValue()) / 1000.0
+					out = append(out, m)
+				}
+			}
+		} else if ms.Type == autoscaling.ExternalMetricSourceType {
+			m.LabelKeys = append(m.LabelKeys, "metric_name")
+			m.LabelValues = append(m.LabelValues, ms.External.Metric.Name)
+
+			mt := ms.External.Target
+			if mt.Type == autoscaling.AverageValueMetricType {
+				if v := mt.AverageValue; v != nil {
+					m.LabelKeys = append(m.LabelKeys, "target_type")
+					m.LabelValues = append(m.LabelValues, "AverageValue")
+					m.Value = float64(v.MilliValue()) / 1000.0
+					out = append(out, m)
+				}
+			} else if mt.Type == autoscaling.ValueMetricType {
+				if v := mt.Value; v != nil {
+					m.LabelKeys = append(m.LabelKeys, "target_type")
+					m.LabelValues = append(m.LabelValues, "Value")
+					m.Value = float64(v.MilliValue()) / 1000.0
+					out = append(out, m)
+				}
 			}
 		}
 	}
@@ -235,22 +293,63 @@ func generateMetricsFromMetricStatus(mss []autoscaling.MetricStatus) []*metric.M
 			m.LabelKeys = append(m.LabelKeys, "name")
 			m.LabelValues = append(m.LabelValues, string(ms.Resource.Name))
 
-			if v := ms.Resource.CurrentAverageUtilization; v != nil {
-				mcopy := &metric.Metric{}
-				copy(mcopy.LabelKeys, m.LabelKeys)
-				copy(mcopy.LabelValues, m.LabelValues)
-
-				mcopy.LabelKeys = append(m.LabelKeys, "target_type")
-				mcopy.LabelValues = append(m.LabelValues, "AverageUtilization")
-				mcopy.Value = float64(*v)
-				out = append(out, mcopy)
+			mvs := ms.Resource.Current
+			if v := mvs.AverageUtilization; v != nil {
+				m.LabelKeys = append(m.LabelKeys, "target_type")
+				m.LabelValues = append(m.LabelValues, "AverageUtilization")
+				m.Value = float64(*v)
+				out = append(out, m)
+			} else if v := mvs.AverageValue; v != nil {
+				m.LabelKeys = append(m.LabelKeys, "target_type")
+				m.LabelValues = append(m.LabelValues, "AverageValue")
+				m.Value = float64(v.MilliValue()) / 1000.0
+				out = append(out, m)
 			}
+		} else if ms.Type == autoscaling.PodsMetricSourceType {
+			m.LabelKeys = append(m.LabelKeys, "metric_name")
+			m.LabelValues = append(m.LabelValues, ms.Pods.Metric.Name)
 
-			v := ms.Resource.CurrentAverageValue;
-			m.LabelKeys = append(m.LabelKeys, "target_type")
-			m.LabelValues = append(m.LabelValues, "AverageValue")
-			m.Value = float64(v.MilliValue())
-			out = append(out, m)
+			mvs := ms.Pods.Current
+			if v := mvs.AverageValue; v != nil {
+				m.LabelKeys = append(m.LabelKeys, "target_type")
+				m.LabelValues = append(m.LabelValues, "AverageValue")
+				m.Value = float64(v.MilliValue()) / 1000.0
+				out = append(out, m)
+			}
+		} else if ms.Type == autoscaling.ObjectMetricSourceType {
+			m.LabelKeys = append(m.LabelKeys, "metric_name")
+			m.LabelValues = append(m.LabelValues, ms.Object.Metric.Name)
+
+			mvs := ms.Object.Current
+			if v := mvs.AverageValue; v != nil {
+				m.LabelKeys = append(m.LabelKeys, "target_type")
+				m.LabelValues = append(m.LabelValues, "AverageValue")
+				m.Value = float64(v.MilliValue()) / 1000.0
+				out = append(out, m)
+			}
+			if v := mvs.Value; v != nil {
+				m.LabelKeys = append(m.LabelKeys, "target_type")
+				m.LabelValues = append(m.LabelValues, "Value")
+				m.Value = float64(v.MilliValue()) / 1000.0
+				out = append(out, m)
+			}
+		} else if ms.Type == autoscaling.ExternalMetricSourceType {
+			m.LabelKeys = append(m.LabelKeys, "metric_name")
+			m.LabelValues = append(m.LabelValues, ms.External.Metric.Name)
+
+			mvs := ms.External.Current
+			if v := mvs.AverageValue; v != nil {
+				m.LabelKeys = append(m.LabelKeys, "target_type")
+				m.LabelValues = append(m.LabelValues, "AverageValue")
+				m.Value = float64(v.MilliValue()) / 1000.0
+				out = append(out, m)
+			}
+			if v := mvs.Value; v != nil {
+				m.LabelKeys = append(m.LabelKeys, "target_type")
+				m.LabelValues = append(m.LabelValues, "Value")
+				m.Value = float64(v.MilliValue()) / 1000.0
+				out = append(out, m)
+			}
 		}
 	}
 
