@@ -17,15 +17,18 @@
 set -e
 set -o pipefail
 
-KUBERNETES_VERSION=v1.10.0
+KUBERNETES_VERSION=v1.15.1
 KUBE_STATE_METRICS_LOG_DIR=./log
 KUBE_STATE_METRICS_IMAGE_NAME='quay.io/coreos/kube-state-metrics'
-PROMETHEUS_VERSION=2.0.0
+PROMETHEUS_VERSION=2.11.0
 E2E_SETUP_MINIKUBE=${E2E_SETUP_MINIKUBE:-}
 E2E_SETUP_KUBECTL=${E2E_SETUP_KUBECTL:-}
 E2E_SETUP_PROMTOOL=${E2E_SETUP_PROMTOOL:-}
+MINIKUBE_VERSION=v1.2.0
 MINIKUBE_DRIVER=${MINIKUBE_DRIVER:-virtualbox}
 SUDO=${SUDO:-}
+
+EXCLUDED_RESOURCE_REGEX="verticalpodautoscaler"
 
 mkdir -p ${KUBE_STATE_METRICS_LOG_DIR}
 
@@ -38,7 +41,7 @@ function finish() {
 }
 
 function setup_minikube() {
-    curl -sLo minikube https://storage.googleapis.com/minikube/releases/v0.25.2/minikube-linux-amd64 \
+    curl -sLo minikube https://storage.googleapis.com/minikube/releases/${MINIKUBE_VERSION}/minikube-linux-amd64 \
         && chmod +x minikube \
         && ${SUDO} mv minikube /usr/local/bin/
 }
@@ -122,9 +125,6 @@ kubectl create -f ./kubernetes/kube-state-metrics-service-account.yaml
 kubectl create -f ./kubernetes/kube-state-metrics-cluster-role.yaml
 kubectl create -f ./kubernetes/kube-state-metrics-cluster-role-binding.yaml
 
-kubectl create -f ./kubernetes/kube-state-metrics-role-binding.yaml
-kubectl create -f ./kubernetes/kube-state-metrics-role.yaml
-
 kubectl create -f ./kubernetes/kube-state-metrics-deployment.yaml
 
 kubectl create -f ./kubernetes/kube-state-metrics-service.yaml
@@ -142,7 +142,7 @@ kubectl proxy &
 # this for loop waits until kube-state-metrics is running by accessing the healthz endpoint
 for _ in {1..30}; do # timeout for 1 minutes
     KUBE_STATE_METRICS_STATUS=$(curl -s "http://localhost:8001/api/v1/namespaces/kube-system/services/kube-state-metrics:http-metrics/proxy/healthz")
-    if [[ "$KUBE_STATE_METRICS_STATUS" == "ok" ]]; then
+    if [[ "${KUBE_STATE_METRICS_STATUS}" == "OK" ]]; then
         is_kube_state_metrics_running="true"
         break
     fi
@@ -168,20 +168,29 @@ echo "check metrics format with promtool"
 [[ -n "$E2E_SETUP_PROMTOOL" ]] && setup_promtool
 < ${KUBE_STATE_METRICS_LOG_DIR}/metrics promtool check metrics
 
-collectors=$(find internal/collector/ -maxdepth 1 -name "*.go" -not -name "*_test.go" -not -name "builder.go" -not -name "testutils.go" -not -name "utils.go" -print0 | xargs -0 -n1 basename | awk -F. '{print $1}')
-echo "available collectors: $collectors"
-for collector in ${collectors}; do
-    echo "checking that kube_${collector}* metrics exists"
-    grep "^kube_${collector}_" ${KUBE_STATE_METRICS_LOG_DIR}/metrics
+resources=$(find internal/store/ -maxdepth 1 -name "*.go" -not -name "*_test.go" -not -name "builder.go" -not -name "testutils.go" -not -name "utils.go" -print0 | xargs -0 -n1 basename | awk -F. '{print $1}'| grep -v "$EXCLUDED_RESOURCE_REGEX")
+echo "available resources: $resources"
+for resource in ${resources}; do
+    echo "checking that kube_${resource}* metrics exists"
+    grep "^kube_${resource}_" ${KUBE_STATE_METRICS_LOG_DIR}/metrics
 done
 
 KUBE_STATE_METRICS_STATUS=$(curl -s "http://localhost:8001/api/v1/namespaces/kube-system/services/kube-state-metrics:http-metrics/proxy/healthz")
-if [[ "$KUBE_STATE_METRICS_STATUS" == "ok" ]]; then
+if [[ "${KUBE_STATE_METRICS_STATUS}" == "OK" ]]; then
     echo "kube-state-metrics is still running after accessing metrics endpoint"
-    exit 0
 fi
 
 # wait for klog to flush to log file
 sleep 33
-kubectl --namespace=kube-system logs deployment/kube-state-metrics kube-state-metrics
-exit 1
+klog_err=E$(date +%m%d)
+echo "check for errors in logs"
+output_logs=$(kubectl --namespace=kube-system logs deployment/kube-state-metrics kube-state-metrics)
+if echo "${output_logs}" | grep "^${klog_err}"; then
+    echo ""
+    echo "==========================================="
+    echo "Found errors in the kube-state-metrics logs"
+    echo "==========================================="
+    echo ""
+    echo "${output_logs}"
+    exit 1
+fi

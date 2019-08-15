@@ -1,6 +1,8 @@
-FROM alpine:3.9
+FROM gcr.io/distroless/static
 
 COPY kube-state-metrics /
+
+USER nobody
 
 ENTRYPOINT ["/kube-state-metrics", "--port=8080", "--telemetry-port=8081"]
 
